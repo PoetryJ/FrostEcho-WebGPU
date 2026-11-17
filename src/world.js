@@ -1,4 +1,11 @@
 import { Mesh, icosphere, rnd, rr, rseed, fbm, clamp, sstep } from "./math.js";
+import {
+  coniferMeshes,
+  roundedRoofSnow,
+  snowDriftMesh,
+  mountainRidgeMesh,
+} from "./detail-geometry.js";
+import { groundDetailMap } from "./ground-map.js";
 
 export const TILE = 2;
 export const toWorld = (x, y) => [(x - 25) * TILE, (y - 20) * TILE];
@@ -59,10 +66,19 @@ export function makeWorld(mapData) {
   rseed(41);
   const buildings = mapData.village.buildings.map(buildingPlacement);
   const hero = buildings.find((b) => b.id === "kitchen");
+  const forestPose = [hero.x - 11, 2.65, hero.z + 36, hero.x, 2.6, hero.z];
   const paths = buildings.map((b) =>
     gridPath(mapData.village, [24, 24], [b.doorX, b.doorY]),
   );
   const roadCells = new Set(paths.flat().map(([x, y]) => `${x},${y}`));
+  const approach = [
+    [-28, 64],
+    [-25, 54],
+    [-18, 44],
+    [-9, 33],
+    [-1, 24],
+  ];
+  const groundMap = groundDetailMap(roadCells, toWorld, approach);
   const roadAt = (x, z) =>
     roadCells.has(`${Math.floor(x / TILE + 25)},${Math.floor(z / TILE + 20)}`);
   const terrainHeight = (x, z) => {
@@ -70,7 +86,8 @@ export function makeWorld(mapData) {
     return (
       -0.15 +
       (fbm(x * 0.034, 7, z * 0.034, 3) - 0.5) * (0.32 + outside * 6) +
-      outside * outside * 2
+      outside * outside * 2 +
+      Math.sin(x * 0.19 + z * 0.29 + fbm(x * 0.04, 3, z * 0.04, 2) * 3) * 0.1
     );
   };
 
@@ -118,7 +135,7 @@ export function makeWorld(mapData) {
       emission,
       mat,
       rnd(),
-      0,
+      mesh === "pine" || mesh === "pineSnow" ? 1 : 0,
       0,
     );
   }
@@ -188,16 +205,9 @@ export function makeWorld(mapData) {
     else roof.tri(c, b, a);
   }
   meshes.set("roof", roof.build());
-  const roofSnow = new Mesh();
-  quad(
-    roofSnow,
-    [-0.5, 0, 0.5],
-    [0, 0.5, 0.5],
-    [0, 0.5, -0.5],
-    [-0.5, 0, -0.5],
-  );
-  quad(roofSnow, [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0, -0.5], [0, 0.5, -0.5]);
-  meshes.set("roofSnow", roofSnow.build());
+  meshes.set("roofSnow", roundedRoofSnow());
+  meshes.set("drift", snowDriftMesh());
+  meshes.set("mountain", mountainRidgeMesh());
   const cylinder = new Mesh();
   cylinder.tube(
     [
@@ -210,6 +220,18 @@ export function makeWorld(mapData) {
     () => 1,
   );
   meshes.set("cylinder", cylinder.build());
+  const log = new Mesh();
+  log.tube(
+    [
+      [0, 0, -0.5],
+      [0, 0, 0.5],
+    ],
+    0.5,
+    12,
+    true,
+    () => 1,
+  );
+  meshes.set("log", log.build());
   meshes.set(
     "rock",
     icosphere(2, (x, y, z) => {
@@ -218,44 +240,10 @@ export function makeWorld(mapData) {
     }).build(),
   );
 
-  // Shared ragged branch tiers and snow shelves, instanced once per tree.
-  const needles = new Mesh(),
-    caps = new Mesh();
-  for (let tier = 0; tier < 10; tier++) {
-    const h = 0.18 + tier * 0.073,
-      radius = (1 - h) * 0.34,
-      segments = 18;
-    const rings = [];
-    for (let j = 0; j < 3; j++) {
-      const ring = [];
-      for (let s = 0; s < segments; s++) {
-        const a = (s / segments) * Math.PI * 2,
-          jag = 1 + (s % 2 ? 0.16 : -0.08) + rr(-0.1, 0.1),
-          r = radius * [0.12, 1, 0.66][j] * jag;
-        ring.push([
-          Math.cos(a) * r,
-          h + [0.14, 0, -0.025][j] + rr(-0.009, 0.009),
-          Math.sin(a) * r,
-        ]);
-      }
-      rings.push(ring);
-    }
-    for (let s = 0; s < segments; s++) {
-      const n = (s + 1) % segments;
-      quad(needles, rings[0][s], rings[1][s], rings[1][n], rings[0][n]);
-      quad(needles, rings[1][s], rings[2][s], rings[2][n], rings[1][n]);
-      if (s % 4 !== tier % 4) {
-        const pts = [rings[0][s], rings[1][s], rings[1][n], rings[0][n]].map(
-          (p) => [p[0] * 0.83, p[1] + 0.012, p[2] * 0.83],
-        );
-        quad(caps, ...pts);
-      }
-    }
-  }
-  meshes.set("pine", needles.build());
-  meshes.set("pineSnow", caps.build());
+  for (const [name, mesh] of Object.entries(coniferMeshes()))
+    meshes.set(name, mesh);
   const ground = new Mesh(),
-    N = 160,
+    N = 240,
     span = 420;
   for (let z = 0; z <= N; z++)
     for (let x = 0; x <= N; x++) {
@@ -269,24 +257,7 @@ export function makeWorld(mapData) {
       ground.quad(a, a + N + 1, a + N + 2, a + 1);
     }
   meshes.set("terrain", ground.build());
-  put("terrain", 0, 0, 0, 1, 1, 1, snow, 1);
-
-  // Thin compressed-snow tiles trace actual walkable routes from the source grid.
-  for (const key of roadCells) {
-    const [x, y] = key.split(",").map(Number),
-      [X, Z] = toWorld(x + 0.5, y + 0.5);
-    put(
-      "cube",
-      X,
-      terrainHeight(X, Z) + 0.015,
-      Z,
-      1.96,
-      0.025,
-      1.96,
-      [0.44, 0.53, 0.59],
-      7,
-    );
-  }
+  put("terrain", 0, 0, 0, 1, 1, 1, snow, 8);
 
   function box(x, y, z, sx, sy, sz, col = wood, mat = 2, em = 0, yaw = 0) {
     put("cube", x, y, z, sx, sy, sz, col, mat, em, yaw);
@@ -366,6 +337,36 @@ export function makeWorld(mapData) {
     box(doorX, base + 0.15, front + 1.2, 2.2, 0.13, 1.2, snow, 1);
     put("roof", x, eave, z, w + 1, 3.5, d + 1.1, [0.1, 0.13, 0.15], 4);
     put("roofSnow", x, eave + 0.16, z, w + 1.2, 3.6, d + 1.3, snow, 1);
+    for (const [bankX, bankWidth] of [
+      [x - w / 2 + leftWidth / 2, leftWidth],
+      [doorX + doorW / 2 + rightWidth / 2, rightWidth],
+    ]) {
+      put(
+        "drift",
+        bankX,
+        terrainHeight(bankX, front + 0.2) - 0.03,
+        front + 0.2,
+        bankWidth * 0.54,
+        0.65,
+        0.75,
+        snow,
+        1,
+      );
+    }
+    for (const dx of [-1, 1]) {
+      const xx = x + dx * (w / 2 + 0.1);
+      put(
+        "drift",
+        xx,
+        terrainHeight(xx, z) - 0.04,
+        z,
+        0.8,
+        0.6,
+        d * 0.54,
+        snow,
+        1,
+      );
+    }
     box(x, eave - 0.06, front + 0.55, w + 1.3, 0.18, 0.15, trim);
     box(x, eave - 0.06, z - d / 2 - 0.55, w + 1.3, 0.18, 0.15, trim);
     // Snow lip and short icicles under the eaves.
@@ -405,8 +406,8 @@ export function makeWorld(mapData) {
         wh - 0.18,
         side ? ww - 0.18 : 0.04,
         warm,
-        5,
-        3.8,
+        9,
+        2.25,
       );
       for (const s of [-1, 1]) {
         box(
@@ -537,18 +538,63 @@ export function makeWorld(mapData) {
       for (let j = 0; j < 3; j++)
         for (let i = 0; i < 5 - j; i++)
           put(
-            "cylinder",
+            "log",
             x - w * 0.35 + i * 0.31 + j * 0.15,
             base + 0.36 + j * 0.28,
             front + 0.62,
             0.27,
-            0.85,
             0.27,
+            0.85,
             [0.22, 0.12, 0.06],
             2,
             0,
             Math.PI / 2,
           );
+      // A snow-capped porch, timber joints and small metal fasteners add close-view scale cues.
+      for (let k = 0; k < 9; k++)
+        box(
+          doorX - 1.35 + k * 0.34,
+          base + 0.37,
+          front + 1.0,
+          0.32,
+          0.15,
+          1.65,
+          [0.22, 0.13, 0.075],
+        );
+      for (const dx of [-1.7, 1.7]) {
+        box(doorX + dx, base + 1.53, front + 1.8, 0.15, 2.5, 0.15, trim);
+        box(doorX + dx, base + 1.35, front + 1.2, 0.1, 0.12, 1.2, wood);
+      }
+      box(doorX, base + 2.87, front + 1.8, 3.6, 0.18, 0.2, trim);
+      put("roofSnow", doorX, base + 2.88, front + 1.0, 3.9, 0.6, 2.4, snow, 1);
+      for (const dx of [-w / 2, w / 2])
+        for (let k = 0; k < 11; k++)
+          put(
+            "rock",
+            x + dx,
+            base + 0.6 + k * 0.235,
+            front + 0.18,
+            0.035,
+            0.035,
+            0.025,
+            metal,
+            4,
+          );
+      for (const dx of [-w / 2 - 0.35, w / 2 + 0.35])
+        for (let k = 0; k < 3; k++) {
+          const zz = front - 0.7 - k * 0.8;
+          put(
+            "drift",
+            x + dx,
+            terrainHeight(x + dx, zz),
+            zz,
+            0.85,
+            0.55,
+            1.1,
+            snow,
+            1,
+          );
+        }
     }
   }
   // Village wall footprint follows the original wall bounds and two gate gaps.
@@ -621,6 +667,7 @@ export function makeWorld(mapData) {
       a,
     );
     put("pineSnow", x, y, z, h * sc, h, h * sc, snow, 1, 0, a);
+    put("drift", x, y - 0.04, z, h * 0.1, 0.4, h * 0.085, snow, 1);
     trees++;
   }
   for (const d of mapData.village.decorations.filter(
@@ -630,6 +677,16 @@ export function makeWorld(mapData) {
     tree(x, z, rr(7, 12));
   }
   rseed(42);
+  for (const [x, z, h] of [
+    [-37, 44, 12],
+    [-36, 36, 13],
+    [-18, 55, 10],
+    [-39, 59, 15],
+    [-8, 49, 12],
+    [-5, 61, 14],
+    [-30, 68, 13],
+  ])
+    tree(x, z, h);
   for (let i = 0; i < 1550; i++) {
     const x = rr(-155, 155),
       z = rr(-135, 135),
@@ -637,6 +694,7 @@ export function makeWorld(mapData) {
     if (
       r > 170 ||
       (Math.abs(x) < 57 && Math.abs(z) < 48) ||
+      Math.hypot(x - forestPose[0], z - forestPose[2]) < 7 ||
       rnd() > 0.62 + 0.3 * fbm(x * 0.03, 1, z * 0.03, 2)
     )
       continue;
@@ -679,7 +737,7 @@ export function makeWorld(mapData) {
       x = Math.cos(a) * r,
       z = Math.sin(a) * r;
     put(
-      "rock",
+      "mountain",
       x,
       -8,
       z,
@@ -688,6 +746,8 @@ export function makeWorld(mapData) {
       rr(40, 70),
       [0.24, 0.31, 0.38],
       1,
+      0,
+      a,
     );
   }
   const lampX = hero.door[0] + 2.3,
@@ -702,7 +762,7 @@ export function makeWorld(mapData) {
     cx = hero.x,
     cz = hero.z;
   const poses = {
-    cabin: [cx + 12, heroFloor + 4.3, cz + 6, cx, heroFloor + 2.5, cz],
+    cabin: [cx + 9, heroFloor + 3.8, cz + 6.4, cx, heroFloor + 2.5, cz],
     village: [67, 70, 83, -2, 0, 2],
     inside: [
       cx + 3.5,
@@ -712,7 +772,7 @@ export function makeWorld(mapData) {
       heroFloor + 1.8,
       cz - 2,
     ],
-    forest: [cx - 13, 4, cz + 48, cx, 3, cz],
+    forest: forestPose,
   };
   return {
     meshes,
@@ -724,6 +784,13 @@ export function makeWorld(mapData) {
     buildings,
     hero,
     terrainHeight,
+    groundMap,
+    chimney: [
+      hero.x - hero.width * 0.25,
+      terrainHeight(hero.x, hero.z) + 6.45,
+      hero.z - hero.depth * 0.18,
+      1,
+    ],
     lights: lights.slice(0, 32),
     poses,
     trees,

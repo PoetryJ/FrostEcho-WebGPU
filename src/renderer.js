@@ -28,12 +28,14 @@ export class Renderer {
     Object.assign(this, { canvas, world, device, timed, onError });
     this.ctx = canvas.getContext("webgpu");
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    this.uniforms = new Float32Array(208);
+    this.uniforms = new Float32Array(212);
     this.submit = [null];
     this.gpuMs = 0;
     this.drawCalls = 0;
     this.samples = 0;
     this.pixels = 1600 * 900;
+    this.treeDetailDistance = 52;
+    this.drawDistance = 240;
     this.scale = 1;
     this.width = 0;
     this.height = 0;
@@ -97,6 +99,19 @@ export class Renderer {
       magFilter: "linear",
       minFilter: "linear",
     });
+    const ground = this.world.groundMap;
+    this.groundTexture = this.texture(
+      ground.size,
+      ground.size,
+      "rgba8unorm",
+      T.TEXTURE_BINDING | T.COPY_DST,
+    );
+    d.queue.writeTexture(
+      { texture: this.groundTexture },
+      ground.data,
+      { bytesPerRow: ground.size * 4 },
+      [ground.size, ground.size],
+    );
     const shadowSampler = d.createSampler({
       compare: "less-equal",
       magFilter: "linear",
@@ -114,6 +129,8 @@ export class Renderer {
           texture: { sampleType: "depth" },
         },
         { binding: 2, visibility: S.FRAGMENT, sampler: { type: "comparison" } },
+        { binding: 3, visibility: S.FRAGMENT, texture: {} },
+        { binding: 4, visibility: S.FRAGMENT, sampler: {} },
       ],
     });
     this.globals = d.createBindGroup({
@@ -126,6 +143,8 @@ export class Renderer {
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: this.shadowTexture.createView() },
         { binding: 2, resource: shadowSampler },
+        { binding: 3, resource: this.groundTexture.createView() },
+        { binding: 4, resource: this.sampler },
       ],
     });
     const vertex = [
@@ -160,7 +179,7 @@ export class Renderer {
         depthWriteEnabled: true,
         depthCompare: "greater",
       },
-      multisample: { count: AA },
+      multisample: { count: AA, alphaToCoverageEnabled: true },
     });
     this.pShadow = d.createRenderPipeline({
       layout: layout(this.globalLayout),
@@ -282,7 +301,7 @@ export class Renderer {
       buffer: this.buffer(b.data, B.VERTEX),
       geometry: this.meshes.get(b.mesh),
     }));
-    const seeds = new Float32Array(10000 * 4);
+    const seeds = new Float32Array(10120 * 4);
     let seed = 91463;
     for (let i = 0; i < seeds.length; i++) {
       seed = (Math.imul(seed, 1664525) + 1013904223) | 0;
@@ -473,9 +492,21 @@ export class Renderer {
       let k = 1;
       if (gpu > 13.6 || (gpu > 0 && gpu < 9.8)) k = 11.7 / gpu;
       else if (!gpu && frame > 20) k = 0.8;
-      // Bounded feedback with a dead band prevents resolution oscillating on every frame.
+      // Preserve readable geometry: if pixels reach the clarity floor, reduce distant detail instead.
+      const clarityFloor = Math.min(
+        960 * 720,
+        this.canvas.clientWidth * this.canvas.clientHeight * 0.9,
+      );
+      if (k < 1 && this.pixels <= clarityFloor * 1.03) {
+        this.treeDetailDistance = Math.max(25, this.treeDetailDistance * 0.88);
+        if (this.uniforms[69] > 0.6)
+          this.drawDistance = Math.max(155, this.drawDistance * 0.94);
+      } else if (k > 1) {
+        this.treeDetailDistance = Math.min(52, this.treeDetailDistance + 2);
+        this.drawDistance = Math.min(240, this.drawDistance + 5);
+      }
       this.pixels = Math.max(
-        480 * 270,
+        clarityFloor,
         Math.min(2560 * 1440, this.pixels * Math.max(0.75, Math.min(1.2, k))),
       );
       this.gpuTotal =
@@ -513,13 +544,17 @@ export class Renderer {
         f = dx * u[44] + dz * u[46];
       if (
         b.mesh !== "terrain" &&
-        (dist - b.radius > 240 ||
+        (dist - b.radius > this.drawDistance ||
           f < -b.radius ||
           Math.abs(dx * u[36] + dz * u[38]) >
             Math.max(f, 0) * asp * 0.65 + b.radius)
       )
         continue;
-      const m = b.geometry;
+      const m =
+        dist > this.treeDetailDistance &&
+        (b.mesh === "pine" || b.mesh === "pineSnow")
+          ? this.meshes.get(b.mesh + "Far")
+          : b.geometry;
       r.setVertexBuffer(0, m.v);
       r.setVertexBuffer(1, b.buffer);
       r.setIndexBuffer(m.i, "uint32");
@@ -529,7 +564,7 @@ export class Renderer {
     r.setPipeline(this.pSnow);
     r.setBindGroup(0, this.globals);
     r.setVertexBuffer(0, this.snowBuffer);
-    r.draw(4, 10000);
+    r.draw(4, 10120);
     r.end();
     for (const b of this.bloom) {
       r = e.beginRenderPass(b.pass);

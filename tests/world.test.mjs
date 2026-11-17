@@ -2,10 +2,52 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { makeWorld, buildingPlacement, gridPath } from "../src/world.js";
+import { coniferMeshes, roundedRoofSnow } from "../src/detail-geometry.js";
+import { groundDetailMap } from "../src/ground-map.js";
 
 const data = JSON.parse(
   fs.readFileSync(new URL("../data/frostecho-map.json", import.meta.url)),
 );
+
+test("close and distant conifers share a silhouette family while distant geometry stays smaller", () => {
+  const m = coniferMeshes();
+  assert.ok(m.pineFar.ib.length < m.pine.ib.length / 2);
+  assert.ok(m.pineSnowFar.ib.length < m.pineSnow.ib.length / 2);
+  for (const mesh of Object.values(m))
+    assert.ok(mesh.nv > 0 && mesh.ib.length > 0);
+  const roof = roundedRoofSnow();
+  const vertices = new Float32Array(roof.vb);
+  const ridge = [];
+  for (let i = 0; i < vertices.length; i += 4)
+    if (Math.abs(vertices[i]) < 0.001) ridge.push(vertices[i + 1]);
+  assert.ok(
+    Math.max(...ridge) - Math.min(...ridge) > 0.005,
+    "roof snow must have a varying surface, not a flat sheet",
+  );
+});
+
+test("snow-path texture contains local wear without changing source navigation", () => {
+  const cells = new Set(["15,30"]);
+  const map = groundDetailMap(
+    cells,
+    (x, y) => [(x - 25) * 2, (y - 20) * 2],
+    [],
+  );
+  const channel = (x, z, c) =>
+    map.data[
+      (Math.floor((x / map.span + 0.5) * map.size) +
+        Math.floor((z / map.span + 0.5) * map.size) * map.size) *
+        4 +
+        c
+    ];
+  assert.ok(channel(-19, 21, 0) > 0);
+  assert.equal(channel(70, 70, 0), 0);
+  assert.ok(
+    map.data.some((v, i) => i % 4 === 1 && v > 0),
+    "footprints must be represented",
+  );
+  assert.equal(cells.size, 1);
+});
 test("every building and door preserves the FrostEcho grid coordinates and dimensions", () => {
   assert.equal(data.village.buildings.length, 7);
   for (const b of data.village.buildings) {

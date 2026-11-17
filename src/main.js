@@ -41,10 +41,10 @@ const modes = [
     kicker: "03 / WHEN THE WORLD DISAPPEARS",
     title: "世界隐去，<br>还有一盏灯。",
     description: "风把远方抹成白色。<br>在失去方向之前，找到那扇暖窗。",
-    skyLow: [0.2, 0.28, 0.34],
-    skyHigh: [0.07, 0.12, 0.18],
-    light: [0.12, 0.17, 0.22],
-    fog: [0.24, 0.33, 0.39, 0.048],
+    skyLow: [0.16, 0.22, 0.27],
+    skyHigh: [0.035, 0.065, 0.1],
+    light: [0.16, 0.2, 0.25],
+    fog: [0.2, 0.28, 0.34, 0.041],
     snow: 0.92,
     exposure: 0.95,
     view: "forest",
@@ -52,7 +52,7 @@ const modes = [
 ];
 let renderer,
   world,
-  mode = clamp(Number(params.get("mode")) || 0, 0, 2),
+  mode = params.has("mode") ? clamp(Number(params.get("mode")) || 0, 0, 2) : 2,
   snow = modes[mode].snow,
   view = "cabin",
   last = 0,
@@ -213,6 +213,7 @@ function shadowMatrix() {
   u[31] = 1;
   for (let i = 0; i < world.lights.length; i++)
     u.set(world.lights[i], 80 + i * 4);
+  u.set(world.chimney, 208);
 }
 function updateCamera(dt) {
   if (tour) {
@@ -284,6 +285,8 @@ function frame(now) {
     $("telemetry").dataset.mode = String(mode);
     $("telemetry").dataset.view = view;
     $("telemetry").dataset.drawCalls = String(renderer.drawCalls);
+    $("telemetry").dataset.treeDetailDistance =
+      renderer.treeDetailDistance.toFixed(1);
   }
 }
 function initMap() {
@@ -372,7 +375,7 @@ document.addEventListener("pointerlockchange", () =>
   ),
 );
 function keyboardCode(e) {
-  if (/^[123]$/.test(e.key)) return "Digit" + e.key;
+  if (/^[1234]$/.test(e.key)) return "Digit" + e.key;
   if (e.code && e.code !== "Unidentified") return e.code;
   if (/^[wasdqeh]$/i.test(e.key)) return "Key" + e.key.toUpperCase();
   return e.key === "Shift" ? "ShiftLeft" : "";
@@ -384,6 +387,7 @@ addEventListener("keydown", (e) => {
   if (code === "Digit1") setPose("cabin");
   if (code === "Digit2") setPose("village");
   if (code === "Digit3") setPose("inside");
+  if (code === "Digit4") setPose("forest");
   if (/^Key[WASDQE]$|Shift/.test(code)) {
     keys.add(code);
     tour = false;
